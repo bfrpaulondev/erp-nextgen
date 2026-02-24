@@ -1,0 +1,479 @@
+// ===========================================
+// ERP Next-Gen - Prisma Schema (SQLite for Development)
+// Multi-tenant ERP for Portugal & Angola
+// ===========================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// ===========================================
+// Core Multi-Tenant Models
+// ===========================================
+
+/// Company (Multi-tenant root entity)
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  nif       String   // NIF (Portugal) or NIF/B.I (Angola)
+  country   String   // "PT" or "AO"
+  currency  String   @default("EUR") // "EUR" or "AOA"
+  logo      String?
+  address   String?
+  city      String?
+  phone     String?
+  email     String?
+  website   String?
+  
+  // Settings
+  settings  String?    // JSON string for SQLite
+  
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  users           User[]
+  parties         Party[]
+  chartOfAccounts ChartOfAccount[]
+  items           Item[]
+  invoices        Invoice[]
+  ledgerEntries   LedgerEntry[]
+  stockMovements  StockMovement[]
+  payments        Payment[]
+  taxRates        TaxRate[]
+  
+  @@unique([nif, country])
+  @@map("companies")
+}
+
+/// User (Authentication & Authorization)
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String?  // Hashed password (bcrypt)
+  image     String?
+  role      String   @default("USER") // ADMIN, MANAGER, ACCOUNTANT, USER
+  isActive  Boolean  @default(true)
+  
+  // Multi-tenant
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastLogin DateTime?
+  
+  // Relations
+  invoices       Invoice[]
+  payments       Payment[]
+  auditLogs      AuditLog[]
+  sessions       Session[]
+  accounts       AuthAccount[]  // OAuth accounts
+  
+  @@map("users")
+}
+
+// ===========================================
+// Authentication Models (NextAuth)
+// ===========================================
+
+model AuthAccount {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([provider, providerAccountId])
+  @@map("auth_accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ===========================================
+// Business Entities
+// ===========================================
+
+/// Party (Customers & Suppliers)
+model Party {
+  id          String   @id @default(cuid())
+  name        String
+  fiscalId    String?  // NIF/NIPC (Portugal) or NIF/B.I (Angola)
+  type        String   // CUSTOMER, SUPPLIER, BOTH
+  email       String?
+  phone       String?
+  address     String?
+  city        String?
+  postalCode  String?
+  country     String?  // ISO country code
+  notes       String?
+  
+  // Multi-tenant
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  invoices    Invoice[]
+  payments    Payment[]
+  
+  @@unique([fiscalId, companyId])
+  @@map("parties")
+}
+
+/// ChartOfAccount (Chart of Accounts - Plano de Contas)
+model ChartOfAccount {
+  id          String   @id @default(cuid())
+  code        String   // Account code (e.g., "11", "21.1.1")
+  name        String
+  type        String   // ASSET, LIABILITY, EQUITY, REVENUE, EXPENSE
+  category    String?  // Sub-category for reporting
+  parentCode  String?  // For hierarchical accounts
+  isActive    Boolean  @default(true)
+  description String?
+  
+  // Multi-tenant
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  ledgerEntries LedgerEntry[]
+  
+  @@unique([code, companyId])
+  @@map("chart_of_accounts")
+}
+
+/// Item (Products & Services)
+model Item {
+  id          String   @id @default(cuid())
+  code        String   // Product/Service code
+  name        String
+  description String?
+  type        String   // PRODUCT, SERVICE
+  unit        String   @default("UN") // UN, KG, L, M, H, etc.
+  price       Float
+  cost        Float?
+  stock       Float?   // Current stock quantity
+  minStock    Float?   // Minimum stock alert
+  image       String?
+  isActive    Boolean  @default(true)
+  
+  // Tax Configuration
+  taxRateId   String?
+  taxRate     TaxRate? @relation(fields: [taxRateId], references: [id])
+  
+  // Multi-tenant
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  invoiceLines InvoiceLineItem[]
+  stockMovements StockMovement[]
+  
+  @@unique([code, companyId])
+  @@map("items")
+}
+
+/// TaxRate (Tax Configuration)
+model TaxRate {
+  id          String   @id @default(cuid())
+  name        String   // e.g., "IVA 23%", "IGVA 14%"
+  code        String   // e.g., "NOR", "RED", "ISE"
+  rate        Float    // Percentage
+  country     String   // "PT" or "AO"
+  description String?
+  isActive    Boolean  @default(true)
+  
+  // Multi-tenant
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  items       Item[]
+  invoiceLines InvoiceLineItem[]
+  
+  @@unique([code, companyId, country])
+  @@map("tax_rates")
+}
+
+// ===========================================
+// Invoicing Models
+// ===========================================
+
+/// Invoice (Documents)
+model Invoice {
+  id             String   @id @default(cuid())
+  number         String   // Document number (e.g., "FT 2024/001")
+  series         String   // Series identifier
+  type           String   @default("INVOICE") // INVOICE, CREDIT_NOTE, DEBIT_NOTE, RECEIPT, QUOTE
+  status         String   @default("DRAFT") // DRAFT, PENDING, PAID, PARTIAL, CANCELLED
+  
+  // Document Details
+  date           DateTime @default(now())
+  dueDate        DateTime?
+  notes          String?
+  internalNotes  String?
+  
+  // Amounts
+  subtotal       Float
+  taxAmount      Float
+  discountAmount Float    @default(0)
+  totalAmount    Float
+  paidAmount     Float    @default(0)
+  
+  // Customer Snapshot (for historical accuracy)
+  customerName   String
+  customerFiscalId String?
+  customerAddress String?
+  
+  // Relations
+  customerId     String?
+  customer       Party?   @relation(fields: [customerId], references: [id])
+  
+  // Multi-tenant
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // User who created
+  createdById    String?
+  createdBy      User?    @relation(fields: [createdById], references: [id])
+  
+  // Timestamps
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  lines          InvoiceLineItem[]
+  payments       Payment[]
+  ledgerEntries  LedgerEntry[]
+  
+  @@unique([number, companyId])
+  @@map("invoices")
+}
+
+/// InvoiceLineItem (Invoice Lines)
+model InvoiceLineItem {
+  id            String   @id @default(cuid())
+  description   String
+  quantity      Float
+  unitPrice     Float
+  discount      Float    @default(0) // Percentage
+  taxRate       Float
+  taxAmount     Float
+  total         Float
+  
+  // Relations
+  invoiceId     String
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  itemId        String?
+  item          Item?    @relation(fields: [itemId], references: [id])
+  
+  taxRateId     String?
+  taxRateRel    TaxRate? @relation(fields: [taxRateId], references: [id])
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("invoice_line_items")
+}
+
+/// Payment (Treasury)
+model Payment {
+  id            String   @id @default(cuid())
+  number        String   // Payment reference
+  type          String   @default("RECEIPT") // RECEIPT (recebimento) or PAYMENT (pagamento)
+  date          DateTime @default(now())
+  amount        Float
+  method        String   // CASH, BANK_TRANSFER, CARD, CHECK, DIRECT_DEBIT, MBWAY, OTHER
+  reference     String?  // Bank reference, check number, etc.
+  notes         String?
+  
+  // Relations
+  invoiceId     String?
+  invoice       Invoice? @relation(fields: [invoiceId], references: [id])
+  
+  customerId    String?
+  customer      Party?   @relation(fields: [customerId], references: [id])
+  
+  // Multi-tenant
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // User who created
+  createdById   String?
+  createdBy     User?    @relation(fields: [createdById], references: [id])
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  ledgerEntries LedgerEntry[]
+  
+  @@unique([number, companyId])
+  @@map("payments")
+}
+
+// ===========================================
+// Accounting Models
+// ===========================================
+
+/// LedgerEntry (Journal Entries - Diário Contabilístico)
+model LedgerEntry {
+  id            String   @id @default(cuid())
+  date          DateTime @default(now())
+  description   String
+  debit         Float
+  credit        Float
+  
+  // Source Reference (for audit trail)
+  sourceType    String?  // INVOICE, PAYMENT, MANUAL, ADJUSTMENT
+  sourceId      String?  // Reference to source document
+  
+  // Relations
+  accountId     String
+  account       ChartOfAccount  @relation(fields: [accountId], references: [id])
+  
+  // Multi-tenant
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Document References
+  invoiceId     String?
+  invoice       Invoice? @relation(fields: [invoiceId], references: [id])
+  
+  paymentId     String?
+  payment       Payment? @relation(fields: [paymentId], references: [id])
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("ledger_entries")
+}
+
+/// StockMovement (Inventory Control)
+model StockMovement {
+  id            String   @id @default(cuid())
+  type          String   // IN, OUT, ADJUSTMENT, TRANSFER
+  quantity      Float
+  reference     String?  // Document reference
+  notes         String?
+  
+  // Relations
+  itemId        String
+  item          Item     @relation(fields: [itemId], references: [id])
+  
+  // Source Reference
+  sourceType    String?  // INVOICE, PURCHASE, ADJUSTMENT
+  sourceId      String?
+  
+  // Multi-tenant
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("stock_movements")
+}
+
+/// AuditLog (System Audit Trail)
+model AuditLog {
+  id            String   @id @default(cuid())
+  action        String   // CREATE, UPDATE, DELETE, LOGIN, LOGOUT
+  entityType    String   // Model name
+  entityId      String?  // Entity ID
+  oldValue      String?  // JSON string
+  newValue      String?  // JSON string
+  ipAddress     String?
+  userAgent     String?
+  
+  // User who performed the action
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id])
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  
+  @@map("audit_logs")
+}
+
+// ===========================================
+// Sync Models (Offline-First)
+// ===========================================
+
+/// SyncQueue (Offline Synchronization)
+model SyncQueue {
+  id            String   @id @default(cuid())
+  entityType    String
+  entityId      String
+  operation     String   // CREATE, UPDATE, DELETE
+  data          String   // JSON string
+  status        String   @default("PENDING") // PENDING, SYNCED, FAILED
+  attempts      Int      @default(0)
+  lastAttempt   DateTime?
+  errorMessage  String?
+  
+  // Multi-tenant
+  companyId     String
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([status, createdAt])
+  @@map("sync_queue")
+}
