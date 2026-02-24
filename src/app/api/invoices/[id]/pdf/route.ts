@@ -1,6 +1,6 @@
 /**
  * Invoice PDF Generation API
- * Generates PDF documents for invoices
+ * Generates PDF documents for invoices with QR Code (ATCUD compliant)
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -10,6 +10,7 @@ import prisma from '@/lib/prisma'
 import { DOCUMENT_TYPE_CONFIG, formatCurrency, formatDate } from '@/lib/invoice-utils'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
+import QRCode from 'qrcode'
 
 // ===========================================
 // Helper Functions
@@ -30,6 +31,47 @@ function getStatusText(status: string): string {
     CANCELLED: 'ANULADO',
   }
   return statusMap[status] || status
+}
+
+/**
+ * Generate ATCUD code (simplified version for demonstration)
+ * In production, this should integrate with the Portuguese Tax Authority
+ */
+function generateATCUD(
+  seriesNumber: string,
+  companyNif: string,
+  date: Date,
+  total: number
+): string {
+  const dateStr = date.toISOString().split('T')[0].replace(/-/g, '')
+  const hash = Buffer.from(`${companyNif}${dateStr}${seriesNumber}${total}`).toString('base64').slice(0, 8)
+  return `${seriesNumber}-${hash.toUpperCase()}`
+}
+
+/**
+ * Generate QR Code data for Portuguese invoices
+ * Format: A:CompanyNIF*B:CustomerNIF*C:DocumentType*D:DocumentNumber*E:Date*F:Total*G:ATCUD*H:CertificateNumber
+ */
+function generateQRData(
+  companyNif: string,
+  customerNif: string | null,
+  docType: string,
+  docNumber: string,
+  date: Date,
+  total: number,
+  atcud: string
+): string {
+  const fields = [
+    `A:${companyNif}`,
+    `B:${customerNif || '999999990'}`, // Default for consumers without NIF
+    `C:${docType}`,
+    `D:${docNumber}`,
+    `E:${date.toISOString().split('T')[0]}`,
+    `F:${total.toFixed(2)}`,
+    `G:${atcud}`,
+    `H:0`, // Certificate number (would be assigned by AT)
+  ]
+  return fields.join('*')
 }
 
 // ===========================================
@@ -83,6 +125,35 @@ export async function GET(
 
     // Get company details
     const company = invoice.company
+
+    // Generate ATCUD code
+    const atcud = generateATCUD(
+      invoice.number,
+      company.nif,
+      new Date(invoice.date),
+      Number(invoice.totalAmount)
+    )
+
+    // Generate QR Code data
+    const qrData = generateQRData(
+      company.nif,
+      invoice.customerFiscalId,
+      invoice.type,
+      invoice.number,
+      new Date(invoice.date),
+      Number(invoice.totalAmount),
+      atcud
+    )
+
+    // Generate QR Code as base64
+    const qrCodeDataUrl = await QRCode.toDataURL(qrData, {
+      width: 150,
+      margin: 1,
+      color: {
+        dark: '#000000',
+        light: '#ffffff',
+      },
+    })
 
     // Create PDF
     const doc = new jsPDF() as jsPDF & { lastAutoTable: { finalY: number } }
@@ -296,6 +367,38 @@ export async function GET(
     }
 
     // ===========================================
+    // QR Code and ATCUD Section
+    // ===========================================
+
+    // Add QR Code
+    const qrSize = 35
+    const qrX = margin
+    const qrY = yPos + 5
+
+    // Add QR Code image
+    doc.addImage(qrCodeDataUrl, 'PNG', qrX, qrY, qrSize, qrSize)
+
+    // ATCUD and certification info next to QR
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'bold')
+    doc.text('ATCUD:', qrX + qrSize + 5, qrY + 8)
+    doc.setFont('helvetica', 'normal')
+    doc.text(atcud, qrX + qrSize + 20, qrY + 8)
+
+    doc.setFont('helvetica', 'bold')
+    doc.text('Certificado:', qrX + qrSize + 5, qrY + 14)
+    doc.setFont('helvetica', 'normal')
+    doc.text('Pendente de certificação', qrX + qrSize + 28, qrY + 14)
+
+    // Tax breakdown
+    doc.setFont('helvetica', 'bold')
+    doc.text('IVA:', qrX + qrSize + 5, qrY + 22)
+    doc.setFont('helvetica', 'normal')
+    doc.text(formatCurrency(Number(invoice.taxAmount), company.currency as 'EUR' | 'AOA'), qrX + qrSize + 15, qrY + 22)
+
+    yPos = qrY + qrSize + 15
+
+    // ===========================================
     // Footer
     // ===========================================
 
@@ -303,7 +406,7 @@ export async function GET(
     doc.setFontSize(8)
     doc.setTextColor(128, 128, 128)
     doc.text(
-      `Documento gerado em ${new Date().toLocaleDateString('pt-PT')} às ${new Date().toLocaleTimeString('pt-PT')}`,
+      `Documento gerado em ${new Date().toLocaleDateString('pt-PT')} às ${new Date().toLocaleTimeString('pt-PT')} | ERP Next-Gen`,
       pageWidth / 2,
       footerY,
       { align: 'center' }
